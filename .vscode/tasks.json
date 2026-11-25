@@ -1,0 +1,17 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run review dashboard",
+			"type": "shell",
+			"command": ".\\target\\release\\review-watch.exe",
+			"args": [
+				"--config",
+				".\\config.toml",
+				"tui"
+			],
+			"isBackground": true,
+			"problemMatcher": []
+		}
+	]
+}

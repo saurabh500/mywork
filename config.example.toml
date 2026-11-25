@@ -1,0 +1,13 @@
+# Copy to config.toml. Authenticate separately with gh auth login.
+repositories = ["YOUR-ORG/YOUR-REPO"]
+authors = ["TEAMMATE-LOGIN"]
+quiet_hours = 8
+database = "review-watch.sqlite3"
+
+# Optional. Omit this section to use the dashboard without publishing.
+# Topics are secrets: use a long random topic and preferably authenticated ntfy.
+# [ntfy]
+# enabled = false # Set true only when you are ready for real publishes.
+# server = "https://ntfy.sh"
+# topic_env = "REVIEW_WATCH_NTFY_TOPIC"
+# token_env = "REVIEW_WATCH_NTFY_TOKEN"
