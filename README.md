@@ -30,6 +30,15 @@ The database path is relative to the **configuration file**, not the working
 directory. Its parent directory must exist. Use the same database for scheduled
 checks and the dashboard. Repository and author matching is case-insensitive.
 All configured authors are watched in all configured repositories.
+Set `assignee = "saurabh500"` to also watch open PRs assigned to that GitHub
+login, regardless of author, within the configured repositories. This is an
+either/or match, not a requirement that both author and assignee match. It uses
+PR assignees, not requested reviewers. Omit `assignee` for author-only tracking;
+set `authors = []` for assignee-only tracking. Matching is case-insensitive.
+Restart the dashboard after changing the configuration.
+Set `hide_drafts = true` to omit drafts from the dashboard (default: `false`).
+Drafts are still tracked internally so draft-to-ready notifications keep working;
+they remain in the saved snapshot and never alert while draft.
 
 The initial real `check` establishes the baseline. A dry run fetches real GitHub
 data and prints proposed messages, but sends nothing and rolls back PR state,
@@ -111,6 +120,9 @@ thread's comment pages are fetched. Author filtering happens locally, avoiding
 GitHub search's result cap. A repository with many PRs/comments can be slow and
 consume significant API quota. Review-request display supports up to 100
 requests; larger lists fail explicitly rather than silently truncate.
+Assignee lists likewise support up to 100 assignees and fail explicitly if larger.
+Assigned PRs use the same notification rules; an unlisted author's first observed
+sync establishes that author's baseline in that repository.
 
 **Failures and duplicates:** A failed or partial GitHub snapshot sends no alerts
 and preserves the preceding snapshot. All repositories must fetch successfully

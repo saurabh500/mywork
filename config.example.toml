@@ -1,6 +1,9 @@
 # Copy to config.toml. Authenticate separately with gh auth login.
 repositories = ["YOUR-ORG/YOUR-REPO"]
 authors = ["TEAMMATE-LOGIN"]
+# Optional: also include PRs assigned to this GitHub login (not review requests).
+# assignee = "YOUR-LOGIN"
+hide_drafts = false # Set true to omit drafts from the dashboard.
 quiet_hours = 8
 database = "review-watch.sqlite3"
 

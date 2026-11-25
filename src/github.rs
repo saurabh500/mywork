@@ -45,6 +45,7 @@ pub trait Graphql {
 const PR_FIELDS: &str = r#"
 id number title url createdAt isDraft headRefOid reviewDecision
 author { login }
+assignees(first:100) { totalCount nodes { login } }
 reviewRequests(first:100) {
   totalCount nodes { requestedReviewer { ... on User { login } ... on Team { name } } }
 }
@@ -282,7 +283,23 @@ impl<C: Graphql> Source for Github<C> {
                         .pointer("/author/login")
                         .and_then(Value::as_str)
                         .context("Missing PR author")?;
-                    if !config.watches(repo, author) {
+                    let assignees = node
+                        .pointer("/assignees/nodes")
+                        .and_then(Value::as_array)
+                        .context("Missing PR assignees")?;
+                    if node
+                        .pointer("/assignees/totalCount")
+                        .and_then(Value::as_u64)
+                        .context("Missing assignee count")?
+                        > 100
+                    {
+                        bail!("More than 100 assignees; refusing truncated snapshot");
+                    }
+                    let assignees = assignees
+                        .iter()
+                        .map(|a| text(a, "login").map(str::to_owned))
+                        .collect::<Result<Vec<_>>>()?;
+                    if !config.watches(repo, author, &assignees) {
                         return Ok(());
                     }
                     let created = time(node, "createdAt")?;
@@ -310,6 +327,7 @@ impl<C: Graphql> Source for Github<C> {
                         title: text(node, "title")?.into(),
                         url: text(node, "url")?.into(),
                         author: author.into(),
+                        assignees,
                         created,
                         draft,
                         head: text(node, "headRefOid")?.into(),
@@ -490,6 +508,8 @@ mod tests {
         Config {
             repositories: vec!["org/repo".into()],
             authors: vec!["alice".into()],
+            assignee: None,
+            hide_drafts: false,
             quiet_hours: 8,
             database: "unused.sqlite3".into(),
             ntfy: None,
@@ -503,6 +523,7 @@ mod tests {
                 "id":"pr1","number":1,"title":"Title","url":"https://github.com/org/repo/pull/1",
                 "createdAt":"2026-01-01T00:00:00Z","isDraft":false,"headRefOid":"head",
                 "reviewDecision":null,"author":{"login":"alice"},
+                "assignees":{"totalCount":0,"nodes":[]},
                 "reviewRequests":{"totalCount":1,"nodes":[{"requestedReviewer":{"login":"reviewer"}}]}
             })],
             None,
@@ -510,7 +531,7 @@ mod tests {
         let graph = Github(MockGraph(RefCell::new(VecDeque::from([
             (
                 None,
-                json!({"data":{"repository":{"pullRequests":connection(vec![json!({"author":{"login":"bob"}})],Some("prs2"))}}}),
+                json!({"data":{"repository":{"pullRequests":connection(vec![json!({"author":{"login":"bob"},"assignees":{"totalCount":0,"nodes":[]}})],Some("prs2"))}}}),
             ),
             (
                 Some("prs2"),
@@ -572,6 +593,72 @@ mod tests {
         assert_eq!(result[0].requested, vec!["reviewer"]);
         assert!(graph.0.0.borrow().is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn fetches_author_or_assignee_without_duplicates_and_ignores_review_requests() -> Result<()> {
+        let mut cfg = config();
+        cfg.assignee = Some("saurabh500".into());
+        let nodes = [
+            ("alice", vec![], vec![]),
+            ("bob", vec!["SAURABH500"], vec![]),
+            ("alice", vec!["saurabh500"], vec![]),
+            ("carol", vec!["someone-else"], vec!["saurabh500"]),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (author, assignees, reviewers))| {
+            json!({
+                "id":format!("pr{index}"),"number":index + 1,"title":"Title",
+                "url":format!("https://github.com/org/repo/pull/{}",index + 1),
+                "createdAt":"2026-01-01T00:00:00Z","isDraft":true,"headRefOid":"head",
+                "reviewDecision":null,"author":{"login":author},
+                "assignees":{"totalCount":assignees.len(),"nodes":assignees.iter().map(|login| json!({"login":login})).collect::<Vec<_>>()},
+                "reviewRequests":{"totalCount":reviewers.len(),"nodes":reviewers.iter().map(|login| json!({"requestedReviewer":{"login":login}})).collect::<Vec<_>>()}
+            })
+        })
+        .collect();
+        let response = json!({"data":{"repository":{"pullRequests":connection(nodes,None)}}});
+        let graph = Github(MockGraph(RefCell::new(VecDeque::from([
+            (None, response.clone()),
+            (None, response.clone()),
+            (None, response),
+        ]))));
+        for _ in 0..2 {
+            let result = graph.fetch(&cfg)?;
+            assert_eq!(
+                result.iter().map(|pr| pr.number).collect::<Vec<_>>(),
+                vec![1, 2, 3]
+            );
+            assert_eq!(result[1].assignees, vec!["SAURABH500"]);
+        }
+        cfg.assignee = None;
+        let result = graph.fetch(&cfg)?;
+        assert_eq!(
+            result.iter().map(|pr| pr.number).collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+        assert!(graph.0.0.borrow().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_truncated_or_missing_assignees() {
+        for assignees in [
+            json!({"totalCount":101,"nodes":[{"login":"someone-else"}]}),
+            json!({"totalCount":1,"nodes":[{}]}),
+            Value::Null,
+        ] {
+            let graph = Github(MockGraph(RefCell::new(VecDeque::from([(
+                None,
+                json!({"data":{"repository":{"pullRequests":connection(vec![json!({
+                    "author":{"login":"bob"},"assignees":assignees
+                })],None)}}}),
+            )]))));
+            let mut cfg = config();
+            cfg.assignee = Some("saurabh500".into());
+            assert!(graph.fetch(&cfg).is_err());
+        }
     }
 
     #[test]

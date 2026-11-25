@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     pub repositories: Vec<String>,
     pub authors: Vec<String>,
+    pub assignee: Option<String>,
+    #[serde(default)]
+    pub hide_drafts: bool,
     #[serde(default = "eight")]
     pub quiet_hours: u32,
     #[serde(default = "database")]
@@ -38,8 +41,13 @@ impl Config {
             &std::fs::read_to_string(path)
                 .with_context(|| format!("Read configuration {}", path.display()))?,
         )?;
-        if config.repositories.is_empty() || config.authors.is_empty() || config.quiet_hours == 0 {
-            bail!("repositories and authors must be nonempty; quiet_hours must be positive");
+        if config.repositories.is_empty()
+            || (config.authors.is_empty() && config.assignee.is_none())
+            || config.quiet_hours == 0
+        {
+            bail!(
+                "repositories and at least one author or assignee must be configured; quiet_hours must be positive"
+            );
         }
         for repo in &config.repositories {
             let parts: Vec<_> = repo.split('/').collect();
@@ -49,6 +57,12 @@ impl Config {
         }
         if config.authors.iter().any(|author| !valid_name(author)) {
             bail!("authors must contain GitHub logins, not display names");
+        }
+        if let Some(assignee) = &mut config.assignee {
+            if !valid_name(assignee) {
+                bail!("assignee must contain a GitHub login, not a display name");
+            }
+            assignee.make_ascii_lowercase();
         }
         config
             .repositories
@@ -88,11 +102,15 @@ impl Config {
         Ok(config)
     }
 
-    pub fn watches(&self, repo: &str, author: &str) -> bool {
+    pub fn watches(&self, repo: &str, author: &str, assignees: &[String]) -> bool {
         self.repositories
             .iter()
             .any(|r| r.eq_ignore_ascii_case(repo))
-            && self.authors.iter().any(|a| a.eq_ignore_ascii_case(author))
+            && (self.authors.iter().any(|a| a.eq_ignore_ascii_case(author))
+                || self
+                    .assignee
+                    .as_ref()
+                    .is_some_and(|login| assignees.iter().any(|a| a.eq_ignore_ascii_case(login))))
     }
 }
 
@@ -143,6 +161,35 @@ mod tests {
         let ntfy = configured.ntfy.as_ref().unwrap();
         assert!(!ntfy.enabled);
         assert!(crate::watcher::NtfyDelivery::new(ntfy).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn includes_authors_or_assignee_only_in_configured_repositories() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let file = dir.path().join("config.toml");
+        std::fs::write(
+            &file,
+            "repositories=['org/repo']\nauthors=['alice']\nassignee='Saurabh500'\n",
+        )?;
+        let config = Config::load(&file)?;
+        assert_eq!(config.assignee.as_deref(), Some("saurabh500"));
+        assert!(config.watches("ORG/REPO", "Alice", &[]));
+        assert!(config.watches("org/repo", "bob", &["SAURABH500".into()]));
+        assert!(!config.watches("org/repo", "bob", &["someone-else".into()]));
+        assert!(!config.watches("org/other", "alice", &["saurabh500".into()]));
+        std::fs::write(
+            &file,
+            "repositories=['org/repo']\nauthors=[]\nassignee='saurabh500'\n",
+        )?;
+        assert!(Config::load(&file)?.watches("org/repo", "bob", &["saurabh500".into()]));
+        for login in ["", "not a login"] {
+            std::fs::write(
+                &file,
+                format!("repositories=['org/repo']\nauthors=['alice']\nassignee='{login}'\n"),
+            )?;
+            assert!(Config::load(&file).is_err());
+        }
         Ok(())
     }
 }

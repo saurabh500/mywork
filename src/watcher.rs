@@ -19,6 +19,8 @@ pub struct PullRequest {
     pub title: String,
     pub url: String,
     pub author: String,
+    #[serde(default)]
+    pub assignees: Vec<String>,
     pub created: DateTime<Utc>,
     pub draft: bool,
     pub head: String,
@@ -193,6 +195,14 @@ impl Store {
         .collect()
     }
 
+    pub fn dashboard_rows(&self, config: &Config) -> Result<Vec<Row>> {
+        let mut rows = self.rows()?;
+        if config.hide_drafts {
+            rows.retain(|row| !row.pr.draft);
+        }
+        Ok(rows)
+    }
+
     pub fn meta(&self, key: &str) -> Result<Option<String>> {
         Ok(self
             .connection
@@ -297,10 +307,12 @@ fn reconcile(
 ) -> Result<Vec<Alert>> {
     connection.execute("UPDATE prs SET active=0", [])?;
     let mut alerts = Vec::new();
+    let mut observed_scopes = Vec::new();
     for pr in snapshot {
-        if !config.watches(&pr.repo, &pr.author) {
+        if !config.watches(&pr.repo, &pr.author, &pr.assignees) {
             bail!("Snapshot contains an unwatched PR");
         }
+        observed_scopes.push(scope(&pr.repo, &pr.author));
         let key = pr.key();
         let previous: Option<(String, String, i64, bool, Option<String>, i64)> = connection.query_row(
             "SELECT payload,head,activity,quiet_sent,pending,snooze_until FROM prs WHERE key=?1", [&key],
@@ -366,6 +378,12 @@ fn reconcile(
             });
         }
     }
+    for observed_scope in observed_scopes {
+        connection.execute(
+            "INSERT OR IGNORE INTO scopes(key) VALUES (?1)",
+            [observed_scope],
+        )?;
+    }
     for repo in &config.repositories {
         for author in &config.authors {
             connection.execute(
@@ -421,6 +439,8 @@ mod tests {
         let config = Config {
             repositories: vec!["org/repo".into()],
             authors: vec!["alice".into()],
+            assignee: None,
+            hide_drafts: false,
             quiet_hours: 8,
             database: dir.path().join("state.sqlite3"),
             ntfy: None,
@@ -431,6 +451,7 @@ mod tests {
             title: "Private title".into(),
             url: "https://github.com/org/repo/pull/1".into(),
             author: "alice".into(),
+            assignees: vec![],
             created: now,
             draft: false,
             head: "aaa".into(),
@@ -450,6 +471,78 @@ mod tests {
             now,
         )
     }
+    #[test]
+    fn hiding_drafts_preserves_tracking_and_pin_snooze_order() -> Result<()> {
+        let (_dir, mut cfg, source, sender, now) = setup();
+        {
+            let mut prs = source.0.borrow_mut();
+            let mut draft = prs[0].clone();
+            draft.number = 2;
+            draft.draft = true;
+            prs.push(draft);
+        }
+        let mut store = Store::open(&cfg.database)?;
+        store.check_at(&cfg, &source, Some(&sender), now, false)?;
+        assert_eq!(store.dashboard_rows(&cfg)?.len(), 2);
+        cfg.hide_drafts = true;
+        for _ in 0..2 {
+            let rows = store.dashboard_rows(&cfg)?;
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].pr.number, 1);
+            assert_eq!(store.rows()?.len(), 2);
+        }
+        store.toggle_pin("org/repo#1")?;
+        store.snooze("org/repo#1", now)?;
+        let rows = store.dashboard_rows(&cfg)?;
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].pinned);
+        assert!(rows[0].snooze_until > now.timestamp());
+        source.0.borrow_mut()[1].draft = false;
+        let alerts = store.check_at(&cfg, &source, Some(&sender), now, false)?;
+        assert_eq!(store.dashboard_rows(&cfg)?.len(), 2);
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].kind, "Ready for review");
+        Ok(())
+    }
+
+    #[test]
+    fn assigned_prs_persist_with_baseline_and_disappear_when_unassigned() -> Result<()> {
+        let (_dir, mut cfg, source, sender, now) = setup();
+        cfg.assignee = Some("saurabh500".into());
+        {
+            let mut prs = source.0.borrow_mut();
+            prs[0].author = "bob".into();
+            prs[0].assignees = vec!["saurabh500".into()];
+            let mut second = prs[0].clone();
+            second.number = 2;
+            prs.push(second);
+        }
+        let mut store = Store::open(&cfg.database)?;
+        for _ in 0..2 {
+            assert!(
+                store
+                    .check_at(&cfg, &source, Some(&sender), now, false)?
+                    .is_empty()
+            );
+            assert_eq!(store.rows()?.len(), 2);
+        }
+        source.0.borrow_mut().clear();
+        store.check_at(&cfg, &source, Some(&sender), now, false)?;
+        assert!(store.rows()?.is_empty());
+        assert!(sender.sent.borrow().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn old_cached_prs_without_assignees_still_deserialize() -> Result<()> {
+        let (_dir, _cfg, source, _sender, _now) = setup();
+        let mut payload = serde_json::to_value(&source.0.borrow()[0])?;
+        payload.as_object_mut().unwrap().remove("assignees");
+        let pr: PullRequest = serde_json::from_value(payload)?;
+        assert!(pr.assignees.is_empty());
+        Ok(())
+    }
+
     #[test]
     fn threshold_first_sync_restart_and_rearm() -> Result<()> {
         let (_dir, cfg, source, sender, now) = setup();

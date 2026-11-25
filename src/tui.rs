@@ -89,7 +89,7 @@ fn fetch_dashboard(config: &Config, cancelled: Arc<AtomicBool>) -> RefreshResult
         Utc::now,
         false,
     );
-    let rows = store.rows()?;
+    let rows = store.dashboard_rows(config)?;
     let last = store
         .meta("last_refresh")?
         .unwrap_or_else(|| "never".into());
@@ -119,7 +119,7 @@ fn dashboard(terminal: &mut DefaultTerminal, config: &Config) -> Result<()> {
             .meta("last_refresh")?
             .unwrap_or_else(|| "never".into());
         Ok((
-            store.rows()?,
+            store.dashboard_rows(config)?,
             format!("Showing cached data. Last successful refresh: {last}"),
         ))
     })() {
@@ -239,7 +239,7 @@ fn dashboard(terminal: &mut DefaultTerminal, config: &Config) -> Result<()> {
                             } else {
                                 store.snooze(&key_value, Utc::now())?;
                             }
-                            store.rows()
+                            store.dashboard_rows(config)
                         })();
                         match result {
                             Ok(updated) => {
